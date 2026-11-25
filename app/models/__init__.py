@@ -3,6 +3,7 @@ from app.models.customer import Customer
 from app.models.plan import Plan
 from app.models.insurance_application import InsuranceApplication
 from app.models.policy import Policy
+from app.models.contact_inquiries import ContactInquiry
 from app.models.policy_cancellation import PolicyCancellationRequest
 from app.models.plan_benefit import PlanBenefit
 from app.models.plan_condition import PlanCondition

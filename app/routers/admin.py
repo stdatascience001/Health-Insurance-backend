@@ -11,6 +11,13 @@ from app.models.insurance_application import InsuranceApplication
 from app.models.policy import Policy
 from app.schemas.customer import CustomerUpdate
 
+from app.models.plan import Plan
+from app.models.plan_pricing_rule import PlanPricingRule
+from app.models.plan_benefit import PlanBenefit
+from app.models.plan_condition import PlanCondition
+
+from app.schemas.plan import PlanCreate
+
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
 
@@ -147,3 +154,87 @@ def update_customer(
     db.refresh(customer)
 
     return {"message": "Customer updated successfully.", "customer": customer}
+
+
+# Create a new insurance plan
+@router.post("/plans", status_code=status.HTTP_201_CREATED)
+def create_plan(
+    data: PlanCreate,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    try:
+        # Create the main plan
+        new_plan = Plan(
+            name=data.name,
+            description=data.description,
+            plan_type=data.plan_type,
+            min_entry_age=data.min_entry_age,
+            max_entry_age=data.max_entry_age,
+            duration_months=data.duration_months,
+            is_active=True,
+        )
+
+        db.add(new_plan)
+        db.flush()
+
+        # Create pricing rules
+        for rule in data.pricing_rules:
+            pricing_rule = PlanPricingRule(
+                plan_id=new_plan.id,
+                min_age=rule.min_age,
+                max_age=rule.max_age,
+                coverage_amount=rule.coverage_amount,
+                duration_months=rule.duration_months,
+                premium_frequency=rule.premium_frequency,
+                premium_amount=rule.premium_amount,
+                is_active=rule.is_active,
+            )
+
+            db.add(pricing_rule)
+
+        # Create plan benefits
+        for benefit in data.benefits:
+            plan_benefit = PlanBenefit(
+                plan_id=new_plan.id,
+                benefit_name=benefit.benefit_name,
+                description=benefit.description,
+                is_included=benefit.is_included,
+            )
+
+            db.add(plan_benefit)
+
+        # Create plan conditions
+        for condition in data.conditions:
+            plan_condition = PlanCondition(
+                plan_id=new_plan.id,
+                condition_type=condition.condition_type,
+                condition_value=condition.condition_value,
+                description=condition.description,
+            )
+
+            db.add(plan_condition)
+
+        db.commit()
+        db.refresh(new_plan)
+
+        return {
+            "message": "Insurance plan created successfully.",
+            "plan": {
+                "id": str(new_plan.id),
+                "name": new_plan.name,
+                "description": new_plan.description,
+                "plan_type": new_plan.plan_type,
+                "min_entry_age": new_plan.min_entry_age,
+                "max_entry_age": new_plan.max_entry_age,
+                "duration_months": new_plan.duration_months,
+                "is_active": new_plan.is_active,
+            },
+        }
+
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create insurance plan.",
+        )

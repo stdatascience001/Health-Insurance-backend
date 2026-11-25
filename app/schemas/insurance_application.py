@@ -1,12 +1,22 @@
 
 from datetime import date
+from decimal import Decimal
 from typing import Literal
 from pydantic import BaseModel, Field, model_validator, field_validator
 from uuid import UUID
 
 
+
 class InsuranceApplicationCreate(BaseModel):
     plan_id: UUID
+    coverage_amount: Decimal = Field(gt=0)
+    premium_frequency: Literal[
+        "monthly",
+        "quarterly",
+        "half_yearly",
+        "yearly"
+    ]
+
     date_of_birth: date
     gender: str = Field(min_length=1, max_length=20)
     address: str = Field(min_length=5)
@@ -18,7 +28,6 @@ class InsuranceApplicationCreate(BaseModel):
 
     medical_history: str | None = None
 
-    #this will prevent the future dates to enter...
     @field_validator("date_of_birth", "nominee_dob")
     @classmethod
     def validate_dates(cls, value):
