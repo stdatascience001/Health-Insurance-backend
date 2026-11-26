@@ -1,5 +1,6 @@
 
 from datetime import date, timedelta
+from decimal import Decimal
 from uuid import uuid4
 
 import pytest
@@ -14,6 +15,8 @@ from app.schemas.insurance_application import (
 def get_valid_application_data():
     return {
         "plan_id": uuid4(),
+        "coverage_amount": Decimal("500000"),
+        "premium_frequency": "yearly",
         "date_of_birth": date(1995, 5, 15),
         "gender": "Male",
         "address": "Delhi, India",
@@ -32,6 +35,8 @@ def test_application_with_valid_data():
 
     assert application.gender == "Male"
     assert application.nominee_name == "Jane Smith"
+    assert application.coverage_amount == Decimal("500000")
+    assert application.premium_frequency == "yearly"
 
 
 def test_application_with_future_date_of_birth():

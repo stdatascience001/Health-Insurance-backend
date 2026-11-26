@@ -9,3 +9,4 @@ from app.models.plan_benefit import PlanBenefit
 from app.models.plan_condition import PlanCondition
 from app.models.plan_pricing_rule import PlanPricingRule
 from app.models.premium_quote import PremiumQuote
+from app.models.super_admin import SuperAdmin

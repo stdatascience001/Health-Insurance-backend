@@ -1,6 +1,19 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+import secrets
+import hmac
+
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Response
+from fastapi.responses import RedirectResponse
+
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
+
+from app.core.config import settings
+from app.core.microsoft_auth import (
+    get_microsoft_login_url,
+    get_microsoft_user_token,
+    generate_oauth_state,
+    verify_oauth_state,
+)
 
 from app.database.connection import get_db
 from app.models.user import User
@@ -71,7 +84,12 @@ def login_user(data: LoginRequest, db: Session = Depends(get_db)):
     email = str(data.email).strip().lower()
     user = db.query(User).filter(User.email == email).first()
 
-    if (not user or user.is_deleted or not user.is_active or not verify_password(data.password, user.password_hash)):
+    if (
+        not user
+        or user.is_deleted
+        or not user.is_active
+        or not verify_password(data.password, user.password_hash)
+    ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password.",
@@ -80,11 +98,10 @@ def login_user(data: LoginRequest, db: Session = Depends(get_db)):
     access_token = create_access_token(user_id=user.id, role=user.role)
     return LoginResponse(access_token=access_token)
 
+
 # For the current logged in user...
-@router.get('/me')
-def get_my_account(
-    current_user: User = Depends(get_current_user)
-):
+@router.get("/me")
+def get_my_account(current_user: User = Depends(get_current_user)):
     customer_info = None
     if current_user.customer and not current_user.customer.is_deleted:
         customer_info = {
@@ -92,27 +109,50 @@ def get_my_account(
             "full_name": current_user.customer.full_name,
             "email": current_user.customer.email,
             "phone": current_user.customer.phone,
-            "created_at": current_user.customer.created_at.isoformat() if current_user.customer.created_at else None,
+            "created_at": (
+                current_user.customer.created_at.isoformat()
+                if current_user.customer.created_at
+                else None
+            ),
         }
     return {
         "id": str(current_user.id),
         "email": current_user.email,
         "role": current_user.role,
-        "customer": customer_info
+        "customer": customer_info,
     }
 
+#Microsoft Login Endpoint...
+@router.get("/microsoft/login")
+def microsoft_login():
+
+    state = generate_oauth_state()
+
+    login_url = get_microsoft_login_url(state)
+
+    response = RedirectResponse(url=login_url)
+
+    response.set_cookie(
+        key="microsoft_oauth_state",    
+        value=state,
+        httponly=True,
+        secure=False,  # Set True in production with HTTPS
+        samesite="lax",
+        max_age=600,
+    )
+
+    return response
 
 # Update profile for logged in user (customer self-service)
-@router.patch('/me')
+@router.patch("/me")
 def update_my_profile(
     data: CustomerUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
     if not current_user.customer or current_user.customer.is_deleted:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Customer profile not found."
+            status_code=status.HTTP_404_NOT_FOUND, detail="Customer profile not found."
         )
 
     if data.full_name is not None and data.full_name.strip():
@@ -131,16 +171,144 @@ def update_my_profile(
             "full_name": current_user.customer.full_name,
             "email": current_user.customer.email,
             "phone": current_user.customer.phone,
-            "created_at": current_user.customer.created_at.isoformat() if current_user.customer.created_at else None,
-        }
+            "created_at": (
+                current_user.customer.created_at.isoformat()
+                if current_user.customer.created_at
+                else None
+            ),
+        },
     }
 
-# For the admin role 
+
+# For the admin role
 @router.get("/admin")
-def admin_test( admin: User = Depends(get_current_admin)):
+def admin_test(admin: User = Depends(get_current_admin)):
     return {
         "message": "Welcome Admin!",
         "id": str(admin.id),
         "email": admin.email,
-        "role": admin.role
+        "role": admin.role,
     }
+
+#For the admin through microsoft login
+@router.get("/microsoft/callback", response_model=LoginResponse)
+def microsoft_callback(
+    request: Request,
+    response: Response,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+    db: Session = Depends(get_db),
+):
+    # 1. Validate OAuth state
+    stored_state = request.cookies.get("microsoft_oauth_state")
+
+    if (
+        not state
+        or not stored_state
+        or not hmac.compare_digest(state, stored_state)
+        or not verify_oauth_state(state)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired Microsoft authentication state.",
+        )
+    
+    # Clear OAuth state cookie after successful validation
+    response.delete_cookie(
+        key="microsoft_oauth_state",
+        httponly=True,
+        secure=False,
+        samesite="lax",
+)
+
+    if error:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Microsoft authentication was unsuccessful.",
+        )
+
+    if not code:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Authorization code is missing.",
+        )
+
+    # 2. Exchange authorization code for Microsoft tokens
+    try:
+        token_result = get_microsoft_user_token(code)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Microsoft authentication failed.",
+        )
+
+    # 3. Get verified Microsoft identity claims
+    claims = token_result.get("id_token_claims", {})
+
+    microsoft_email = claims.get("preferred_username") or claims.get("email")
+
+    if not microsoft_email:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Unable to retrieve Microsoft account email.",
+        )
+
+    microsoft_email = microsoft_email.strip().lower()
+
+    # 4. Verify authorized Main Admin email
+    authorized_email = settings.MICROSOFT_ADMIN_EMAIL.strip().lower()
+
+    if microsoft_email != authorized_email:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This Microsoft account is not authorized as an admin.",
+        )
+
+    # 5. Find existing user
+    user = db.query(User).filter(User.email == microsoft_email).first()
+
+    if user:
+        if user.is_deleted or not user.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This account is inactive or deleted.",
+            )
+
+        if user.role != "admin":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This account is not registered as an admin.",
+            )
+
+    else:
+        # 6. Bootstrap the initial Main Admin account
+        random_password = secrets.token_urlsafe(48)
+
+        user = User(
+            email=microsoft_email,
+            password_hash=hash_password(random_password),
+            role="admin",
+            is_active=True,
+            is_verified=True,
+        )
+
+        db.add(user)
+
+        try:
+            db.commit()
+            db.refresh(user)
+        except Exception:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Unable to create the Main Admin account.",
+            )
+
+    # 7. Generate existing application JWT
+    access_token = create_access_token(
+        user_id=user.id,
+        role=user.role,
+    )
+
+    return LoginResponse(access_token=access_token)
