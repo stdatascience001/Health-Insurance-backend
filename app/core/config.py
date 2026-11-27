@@ -9,6 +9,7 @@ class Settings(BaseSettings):
 
     #Microsoft Enter ID settings
     MICROSOFT_ADMIN_EMAIL: str
+    INITIAL_SUPER_ADMIN_ROLE: str = "super_admin"
     MICROSOFT_CLIENT_ID: str
     MICROSOFT_CLIENT_SECRET: str
     MICROSOFT_TENANT_ID: str

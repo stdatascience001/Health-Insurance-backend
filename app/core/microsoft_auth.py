@@ -1,4 +1,5 @@
 import msal
+import requests
 import secrets
 from itsdangerous import URLSafeTimedSerializer
 from app.core.config import settings
@@ -21,6 +22,24 @@ def get_microsoft_client():
         authority=MICROSOFT_AUTHORITY,
         client_credential=settings.MICROSOFT_CLIENT_SECRET,
     )
+
+
+# Retrieve the authenticated Microsoft user's profile
+def get_microsoft_user_profile(access_token: str):
+    """
+    .Retrieve the authenticated Microsoft user's profile
+    """
+
+    response = requests.get(
+        "https://graph.microsoft.com/v1.0/me",
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=10,
+    )
+
+    if response.status_code != 200:
+        raise ValueError("Unable to retrieve Microsoft user profile.")
+
+    return response.json()
 
 
 # generates the URL where the admin will sign in.
@@ -59,6 +78,7 @@ def get_microsoft_user_token(code: str):
         )
 
     return result
+
 
 # This protects the OAuth callback against CSRF attacks. The state expires after 10 minutes.
 def generate_oauth_state():

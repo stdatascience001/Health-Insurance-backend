@@ -1,4 +1,3 @@
-import secrets
 import hmac
 
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Response
@@ -11,9 +10,11 @@ from app.core.config import settings
 from app.core.microsoft_auth import (
     get_microsoft_login_url,
     get_microsoft_user_token,
+    get_microsoft_user_profile,
     generate_oauth_state,
     verify_oauth_state,
 )
+from app.models.super_admin import SuperAdmin
 
 from app.database.connection import get_db
 from app.models.user import User
@@ -122,26 +123,24 @@ def get_my_account(current_user: User = Depends(get_current_user)):
         "customer": customer_info,
     }
 
-#Microsoft Login Endpoint...
+# Microsoft Login Endpoint...
 @router.get("/microsoft/login")
-def microsoft_login():
+def microsoft_login(response: Response):
 
     state = generate_oauth_state()
-
     login_url = get_microsoft_login_url(state)
 
     response = RedirectResponse(url=login_url)
-
     response.set_cookie(
-        key="microsoft_oauth_state",    
+        key="microsoft_oauth_state",
         value=state,
         httponly=True,
         secure=False,  # Set True in production with HTTPS
         samesite="lax",
         max_age=600,
     )
+    return {"authorization_url": login_url}
 
-    return response
 
 # Update profile for logged in user (customer self-service)
 @router.patch("/me")
@@ -190,7 +189,8 @@ def admin_test(admin: User = Depends(get_current_admin)):
         "role": admin.role,
     }
 
-#For the admin through microsoft login
+
+# For the admin through microsoft login
 @router.get("/microsoft/callback", response_model=LoginResponse)
 def microsoft_callback(
     request: Request,
@@ -213,14 +213,14 @@ def microsoft_callback(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid or expired Microsoft authentication state.",
         )
-    
+
     # Clear OAuth state cookie after successful validation
     response.delete_cookie(
         key="microsoft_oauth_state",
         httponly=True,
         secure=False,
         samesite="lax",
-)
+    )
 
     if error:
         raise HTTPException(
@@ -243,72 +243,108 @@ def microsoft_callback(
             detail="Microsoft authentication failed.",
         )
 
-    # 3. Get verified Microsoft identity claims
-    claims = token_result.get("id_token_claims", {})
+    access_token = token_result.get("access_token")
 
-    microsoft_email = claims.get("preferred_username") or claims.get("email")
-
-    if not microsoft_email:
+    if not access_token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Unable to retrieve Microsoft account email.",
+            detail="Unable to retrieve Microsoft access token.",
+        )
+
+    # 3. Retrieve Microsoft profile through Graph API
+    try:
+        microsoft_profile = get_microsoft_user_profile(access_token)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Unable to retrieve Microsoft profile.",
+        )
+
+    microsoft_user_id = microsoft_profile.get("id")
+
+    microsoft_email = microsoft_profile.get("mail") or microsoft_profile.get(
+        "userPrincipalName"
+    )
+
+    full_name = microsoft_profile.get("displayName")
+
+    if not microsoft_user_id or not microsoft_email:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incomplete Microsoft profile information.",
         )
 
     microsoft_email = microsoft_email.strip().lower()
 
-    # 4. Verify authorized Main Admin email
-    authorized_email = settings.MICROSOFT_ADMIN_EMAIL.strip().lower()
+    # 4. Check whether this Microsoft account already exists
+    super_admin = (
+        db.query(SuperAdmin)
+        .filter(SuperAdmin.microsoft_user_id == microsoft_user_id)
+        .first()
+    )
 
-    if microsoft_email != authorized_email:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="This Microsoft account is not authorized as an admin.",
-        )
-
-    # 5. Find existing user
-    user = db.query(User).filter(User.email == microsoft_email).first()
-
-    if user:
-        if user.is_deleted or not user.is_active:
+    if super_admin:
+        # Check whether the Super Admin account is active
+        if not super_admin.is_active:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="This account is inactive or deleted.",
+                detail="This Super Admin account is inactive.",
             )
-
-        if user.role != "admin":
+        if super_admin.email.strip().lower() != microsoft_email:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="This account is not registered as an admin.",
+                detail="Microsoft account information does not match.",
             )
-
     else:
-        # 6. Bootstrap the initial Main Admin account
-        random_password = secrets.token_urlsafe(48)
+        # 5. Bootstrap the first Super Admin
+        existing_super_admin = db.query(SuperAdmin).first()
 
-        user = User(
+        authorized_email = settings.MICROSOFT_ADMIN_EMAIL.strip().lower()
+
+        if existing_super_admin:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This Microsoft account is not registered as a Super Admin.",
+            )
+
+        if microsoft_email != authorized_email:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This Microsoft account is not authorized as a Super Admin.",
+            )
+
+        super_admin = SuperAdmin(
+            full_name=full_name or microsoft_email,
             email=microsoft_email,
-            password_hash=hash_password(random_password),
-            role="admin",
+            microsoft_user_id=microsoft_user_id,
+            role="super_admin",
             is_active=True,
-            is_verified=True,
         )
 
-        db.add(user)
+        db.add(super_admin)
 
         try:
             db.commit()
-            db.refresh(user)
+            db.refresh(super_admin)
+
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Super Admin account already exists.",
+            )
+
         except Exception:
             db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Unable to create the Main Admin account.",
+                detail="Unable to create Super Admin account.",
             )
 
-    # 7. Generate existing application JWT
+    # 6. Generate JWT using database ID and database role
     access_token = create_access_token(
-        user_id=user.id,
-        role=user.role,
+        user_id=str(super_admin.id),
+        role=super_admin.role,
     )
 
     return LoginResponse(access_token=access_token)

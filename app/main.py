@@ -11,6 +11,7 @@ from app.routers import plans
 from app.routers.insurance_application import router as application_router
 from app.models.policy import Policy
 from app.routers import contact_inquiries
+from app.routers import super_admin
 from app.models.policy_cancellation import PolicyCancellationRequest
 
 app = FastAPI(
@@ -36,6 +37,7 @@ Base.metadata.create_all(bind=engine)
 
 app.include_router(customer_router)
 app.include_router(auth_router)
+app.include_router(super_admin.router)
 app.include_router(admin.router)
 app.include_router(plans.router)
 app.include_router(application_router)

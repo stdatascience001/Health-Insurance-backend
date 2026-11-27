@@ -35,7 +35,7 @@ def needs_rehash(hashed_password: str) -> bool:
 
 
 # Creating the access token at the time of login
-def create_access_token(user_id: int, role: str) -> str:
+def create_access_token(user_id: str, role: str) -> str:
     expire = datetime.now(timezone.utc) + timedelta(
         minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
     )
